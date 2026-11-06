@@ -115,6 +115,7 @@ PATRONES = {
 
 
 # ---------------- NORMALIZACIÓN ----------------
+
 def normalizar(texto):
     texto = unicodedata.normalize("NFD", str(texto))
     texto = "".join(
@@ -219,6 +220,8 @@ def ocr_pagina(imagen, pagina_num):
         imagen, lang=IDIOMA, config=config,
         output_type=Output.DICT
     )
+
+    palabras = []
     for i, raw in enumerate(datos["text"]):
         texto = raw.strip()
         if not texto:
@@ -340,6 +343,45 @@ def detectar_celdas_tabla(gris):
 
 
 # ---------------- EXTRACCIÓN POR CELDAS ----------------
+
+def ocr_celda(recorte, tipo="texto"):
+    if recorte.size == 0:
+        return "", 0.0
+
+    factor = max(2.0, min(5.0, 900 / max(1, recorte.shape[1])))
+    ampliada = cv2.resize(
+        recorte, None, fx=factor, fy=factor,
+        interpolation=cv2.INTER_CUBIC
+    )
+
+    variantes = [ampliada]
+    _, otsu = cv2.threshold(
+        ampliada, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    variantes.append(otsu)
+
+    bloque = max(11, min(51, (min(ampliada.shape) // 2) * 2 + 1))
+    adaptativa = cv2.adaptiveThreshold(
+        ampliada, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, bloque, 11
+    )
+    variantes.append(adaptativa)
+
+    configs = [
+        "--oem 1 --psm 7",
+        "--oem 1 --psm 8",
+        "--oem 1 --psm 13"
+    ]
+    if tipo in ("numero", "fecha"):
+        configs += [
+            "--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789/",
+            "--oem 1 --psm 8 -c tessedit_char_whitelist=0123456789/"
+        ]
+
+    mejor = ("", 0.0, -1)
+    for variante in variantes:
+        entrada = cv2.copyMakeBorder(
+            variante, 30, 30, 30, 30,
             cv2.BORDER_CONSTANT, value=255
         )
         for config in configs:
@@ -449,6 +491,7 @@ def puntuacion_valor(linea, etiqueta, direccion):
     # No asociar líneas solapadas ni que estén en el lado contrario.
     if distancia < 0:
         return None
+
     # Límite espacial estricto: evita recorrer media página.
     max_dist = min(85, max(35, int(etiqueta["h"] * 2.2)))
     if distancia > max_dist:
@@ -534,6 +577,67 @@ def extraer_por_etiquetas(lineas):
                 })
 
     return candidatos
+
+
+def extraer_patrones(lineas):
+    texto = "\n".join(l["texto"] for l in lineas)
+    resultados = {}
+
+    for campo, patron in PATRONES.items():
+        encontrados = []
+        for match in patron.finditer(texto):
+            valor = match.group(0).upper()
+            # CURP debe cumplir patrón; se deja pendiente de validación.
+            encontrados.append({
+                "valor": valor,
+                "confianza": None,
+                "metodo": "patron_regex",
+                "validacion_humana": "pendiente"
+            })
+        resultados[campo] = encontrados
+
+    return resultados
+
+
+# ---------------- VALIDACIONES BÁSICAS ----------------
+
+def validar_formato(campo, valor):
+    if not valor:
+        return False, "Sin valor reconocido"
+
+    limpio = re.sub(r"\s+", "", str(valor))
+
+    if campo == "oficialia":
+        ok = bool(re.fullmatch(r"\d{1,6}", limpio))
+        return ok, "Número" if ok else "Formato numérico no válido"
+
+    if campo == "libro":
+        ok = bool(re.fullmatch(r"\d{1,8}", limpio))
+        return ok, "Número de libro" if ok else "Libro no numérico"
+
+    if campo == "numero_acta":
+        ok = bool(re.fullmatch(r"\d{1,10}", limpio))
+        return ok, "Número de acta" if ok else "Acta no numérica"
+
+    if campo == "folio":
+        ok = bool(re.fullmatch(r"\d{7,12}", limpio))
+        return ok, "Folio numérico" if ok else "Folio no válido"
+
+    if campo in ("fecha_registro", "fecha_nacimiento"):
+        if not re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", limpio):
+            return False, "Formato de fecha no válido"
+        from datetime import datetime
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                datetime.strptime(limpio, fmt)
+                return True, "Fecha calendario válida"
+            except ValueError:
+                pass
+        return False, "Fecha inexistente"
+
+    if campo == "curp":
+        ok = bool(PATRONES["curp"].fullmatch(limpio))
+        return ok, "Estructura CURP" if ok else "Estructura CURP no válida"
 
     if campo in ("nombre", "primer_apellido", "segundo_apellido",
                  "sexo", "lugar_nacimiento", "nacionalidad"):
@@ -677,6 +781,183 @@ def _coincidencia_alias_en_palabras(palabras, aliases):
         return {"alias": alias, "x": x1, "y": y1, "w": x2-x1,
                 "h": y2-y1, "cx": (x1+x2)/2, "cy": (y1+y2)/2}
     return None
+
+
+def _palabras_en_columna(linea, centro_x, tolerancia):
+    return [p for p in linea["palabras"]
+            if abs((p["x"] + p["w"]/2) - centro_x) <= tolerancia]
+
+
+def _texto_candidato_columna(linea, centro_x, tolerancia, campo):
+    ws = _palabras_en_columna(linea, centro_x, tolerancia)
+    if not ws:
+        return None
+    texto = " ".join(z["texto"] for z in sorted(ws, key=lambda z: z["x"])).strip()
+    if campo == "folio":
+        compacto = re.sub(r"\s+", "", texto)
+        ok = bool(re.fullmatch(r"\d{7,12}", compacto))
+        detalle = "Folio numérico" if ok else "Folio no válido"
+    else:
+        ok, detalle = validar_formato(campo, texto)
+    if not ok:
+        # Para texto, tolerancia algo más amplia: el centro puede variar por longitud.
+        if campo in ("nombre", "primer_apellido", "segundo_apellido",
+                     "sexo", "lugar_nacimiento", "nacionalidad"):
+            letras = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", texto)
+            ok = len(letras) >= 2 and len(texto) <= 80
+    if not ok:
+        return None
+    conf = float(np.mean([z["confianza"] for z in ws]))
+    return {"valor": texto, "confianza": round(conf, 2),
+            "geometria_valor": {
+                "x": min(z["x"] for z in ws),
+                "y": min(z["y"] for z in ws),
+                "w": max(z["x"]+z["w"] for z in ws)-min(z["x"] for z in ws),
+                "h": max(z["y"]+z["h"] for z in ws)-min(z["y"] for z in ws)
+            }, "detalle_validacion": detalle}
+
+
+
+def _filas_celdas_v6(celdas):
+    """Agrupa cajas de celdas por centro vertical, con tolerancia relativa."""
+    validas = [dict(c) for c in (celdas or []) if c.get("w", 0) > 0 and c.get("h", 0) > 0]
+    validas.sort(key=lambda c: (c["y"] + c["h"]/2, c["x"]))
+    filas = []
+    for c in validas:
+        cy = c["y"] + c["h"]/2
+        grupo = None
+        for f in reversed(filas[-8:]):
+            fy = float(np.median([z["y"] + z["h"]/2 for z in f]))
+            fh = float(np.median([z["h"] for z in f]))
+            if abs(cy-fy) <= max(8, min(28, max(fh, c["h"])*0.55)):
+                grupo = f
+                break
+        if grupo is None:
+            filas.append([c])
+        else:
+            grupo.append(c)
+    return [sorted(f, key=lambda z: z["x"]) for f in filas]
+
+
+def _extraer_tabla_celdas_v6(celdas, pagina=1):
+    """Encuentra una tabla por dos filas de celdas y sus etiquetas."""
+    filas = _filas_celdas_v6(celdas)
+    etiquetas = {
+        "oficialia": ["oficialia", "numero de oficialia"],
+        "fecha_registro": ["fecha de registro", "fecha registro"],
+        "libro": ["libro", "numero de libro"],
+        "numero_acta": ["numero de acta", "num de acta"]
+    }
+    mejor_par, mejor_score = None, -1
+    for i, fila in enumerate(filas[:-1]):
+        textos = [normalizar(c.get("texto", "")) for c in fila]
+        encontrados = {}
+        for campo, aliases in etiquetas.items():
+            for j, txt in enumerate(textos):
+                alias, score = mejor_etiqueta(txt, aliases, umbral=0.66)
+                if alias:
+                    encontrados[campo] = j
+                    break
+        if len(encontrados) < 3 or len(fila) < 4:
+            continue
+
+        siguiente = None
+        y_base = max(c["y"] + c["h"] for c in fila)
+        for otra in filas[i+1:]:
+            delta = min(c["y"] for c in otra) - y_base
+            if delta < 0:
+                continue
+            if delta > max(90, float(np.median([c["h"] for c in fila]))*4):
+                break
+            if len(otra) < 4:
+                continue
+            coincidencias = 0
+            for h in fila:
+                hx = h["x"] + h["w"]/2
+                if any(abs(hx-(v["x"]+v["w"]/2)) < max(h["w"],v["w"])*0.65 for v in otra):
+                    coincidencias += 1
+            if coincidencias >= 3:
+                siguiente = otra
+                break
+        if siguiente is None:
+            continue
+        score = len(encontrados)*10 + min(len(fila), 6)
+        if score > mejor_score:
+            mejor_score, mejor_par = score, (fila, siguiente)
+
+    if mejor_par is None:
+        return {}
+
+    encabezados, valores = mejor_par
+    salida = {}
+    orden = ["oficialia", "fecha_registro", "libro", "numero_acta"]
+    for idx, campo in enumerate(orden):
+        if idx >= len(encabezados) or idx >= len(valores):
+            continue
+        celda = valores[idx]
+        bruto = str(celda.get("texto", "")).strip()
+        texto = re.sub(r"\D", "", bruto) if campo != "fecha_registro" else re.sub(r"[^0-9/.-]", "", bruto)
+        ok, detalle = validar_formato(campo, texto)
+        if not ok:
+            continue
+        salida[campo] = {
+            "valor": texto, "confianza": celda.get("confianza", 0),
+            "metodo": "v6_rejilla_tabla_fila_encabezado_valor",
+            "etiqueta_detectada": encabezados[idx].get("texto", ""),
+            "pagina": pagina, "formato_valido": True,
+            "detalle_validacion": detalle, "validacion_humana": "pendiente",
+            "estado": "requiere_confirmacion",
+            "geometria_valor": {k: celda[k] for k in ("x","y","w","h")}
+        }
+    return salida
+
+
+def extraer_por_secciones_v5(lineas, celdas=None):
+    """
+    Extrae datos usando límites de secciones y alineación de columnas.
+    Las posiciones son relativas a las etiquetas detectadas en cada página.
+    """
+    campos = {}
+    paginas = sorted(set(l["pagina"] for l in lineas))
+
+    # A) Tabla registral: etiquetas arriba y valores inmediatamente debajo.
+    config_reg = {
+        "oficialia": ["oficialia", "oficialía"],
+        "fecha_registro": ["fecha de registro", "fecha registro"],
+        "libro": ["libro"],
+        "numero_acta": ["numero de acta", "número de acta"]
+    }
+    for pagina in paginas:
+        ls = [l for l in lineas if l["pagina"] == pagina]
+        etiquetas = []
+        for l in ls:
+            for campo, aliases in config_reg.items():
+                e = _coincidencia_alias_en_palabras(l["palabras"], aliases)
+                if e:
+                    etiquetas.append((campo, l, e))
+        # Agrupar por encabezado/tabla; los valores deben estar debajo y cerca.
+        centros = [e["cx"] for _, _, e in etiquetas]
+        separaciones = [abs(a-b) for i,a in enumerate(sorted(centros))
+                        for b in sorted(centros)[i+1:] if abs(a-b) > 8]
+        paso = float(np.median(separaciones)) if separaciones else 80
+        tolerancia = max(18, min(65, paso * .48))
+        for campo, etiqueta_linea, e in etiquetas:
+            opciones = []
+            for l in ls:
+                cy = l["y"] + l["h"]/2
+                delta = cy - e["cy"]
+                if delta < 2 or delta > 95:
+                    continue
+                cand = _texto_candidato_columna(l, e["cx"], tolerancia, campo)
+                if cand:
+                    opciones.append((delta, cand))
+            if opciones:
+                opciones.sort(key=lambda z: (z[0], -z[1]["confianza"]))
+                elegido = opciones[0][1]
+                campos[campo] = {
+                    **elegido, "metodo": "tabla_registral_columna_dinamica",
+                    "etiqueta_detectada": e["alias"],
+                    "pagina": pagina, "validacion_humana": "pendiente",
                     "estado": "requiere_confirmacion"
                 }
 
@@ -790,6 +1071,277 @@ def extraer_patrones_v5(lineas):
                 "pagina": w.get("pagina", 1),
                 "confianza": w.get("confianza")
             })
+
+    def centro_x(w):
+        return w["x"] + w["w"] / 2
+
+    def centro_y(w):
+        return w["y"] + w["h"] / 2
+
+    def etiqueta_compuesta(alias_tokens):
+        hits = []
+        for w in palabras:
+            t = normalizar(w.get("texto", ""))
+            if t in alias_tokens:
+                hits.append(w)
+        return hits
+
+    # Identificador electrónico: candidato situado debajo de la etiqueta
+    # correspondiente, en la misma zona horizontal.
+    etiquetas_id = etiqueta_compuesta({"identificador", "electronico"})
+    candidatos_id = []
+    for n in numeros:
+        for e in etiquetas_id:
+            dy = centro_y(n) - centro_y(e)
+            dx = abs(centro_x(n) - centro_x(e))
+            if 0 <= dy <= 180 and dx <= 520:
+                candidatos_id.append((dy + dx * 0.18, n))
+    if candidatos_id:
+        elegido = min(candidatos_id, key=lambda z: z[0])[1]
+        resultados["identificador_electronico"] = [{
+            "valor": elegido["valor"], "confianza": elegido["confianza"],
+            "x": elegido["x"], "y": elegido["y"], "w": elegido["w"], "h": elegido["h"],
+            "pagina": elegido.get("pagina", 1),
+            "metodo": "patron_regex_etiqueta_espacial_v11",
+            "validacion_humana": "pendiente"
+        }]
+
+    # Código de verificación: requiere las palabras Código + Verificación;
+    # busca el número inmediatamente debajo y en la misma columna.
+    etiquetas_cod = etiqueta_compuesta({"codigo", "verificacion"})
+    pares_cod = []
+    for a in etiquetas_cod:
+        for b in etiquetas_cod:
+            if a is b:
+                continue
+            if abs(centro_y(a) - centro_y(b)) <= 35 and abs(centro_x(a) - centro_x(b)) <= 360:
+                etiqueta_x = (centro_x(a) + centro_x(b)) / 2
+                etiqueta_y = (centro_y(a) + centro_y(b)) / 2
+                for n in numeros:
+                    dy = centro_y(n) - etiqueta_y
+                    dx = abs(centro_x(n) - etiqueta_x)
+                    if 0 <= dy <= 150 and dx <= 420:
+                        pares_cod.append((dy + dx * 0.18, n))
+    if pares_cod:
+        elegido = min(pares_cod, key=lambda z: z[0])[1]
+        resultados["codigo_verificacion"] = [{
+            "valor": elegido["valor"], "confianza": elegido["confianza"],
+            "x": elegido["x"], "y": elegido["y"], "w": elegido["w"], "h": elegido["h"],
+            "pagina": elegido.get("pagina", 1),
+            "metodo": "patron_regex_etiqueta_espacial_v11",
+            "validacion_humana": "pendiente"
+        }]
+
+    return resultados
+
+
+def adjuntar_evidencia_patrones(resultados, lineas):
+    """Adjunta geometría y confianza OCR a CURP/códigos sin alterar su valor."""
+    def bbox_union(palabras):
+        if not palabras:
+            return None
+        x1 = min(int(w.get("x", 0)) for w in palabras)
+        y1 = min(int(w.get("y", 0)) for w in palabras)
+        x2 = max(int(w.get("x", 0)) + int(w.get("w", 0)) for w in palabras)
+        y2 = max(int(w.get("y", 0)) + int(w.get("h", 0)) for w in palabras)
+        return {"x": x1, "y": y1, "w": x2-x1, "h": y2-y1}
+
+    # Localiza la CURP en las palabras OCR y conserva las cajas que forman el valor.
+    for item in resultados.get("curp", []):
+        objetivo = str(item.get("valor", "")).upper()
+        mejor = None
+        for linea in lineas:
+            palabras = linea.get("palabras", [])
+            texto = " ".join(str(w.get("texto", "")) for w in palabras)
+            match = re.search(re.escape(objetivo), texto, re.IGNORECASE)
+            if not match:
+                # Algunos OCR separan la cadena en varios tokens.
+                compacto = "".join(str(w.get("texto", "")) for w in palabras)
+                match_compacto = re.search(re.escape(objetivo), compacto, re.IGNORECASE)
+                if not match_compacto:
+                    continue
+                # Para texto compacto, se asocian tokens alfanuméricos de la línea.
+                seleccion = [w for w in palabras if re.search(r"[A-Z0-9]", str(w.get("texto", "")), re.I)]
+            else:
+                inicio, fin = match.span()
+                seleccion, cursor = [], 0
+                for w in palabras:
+                    token = str(w.get("texto", ""))
+                    a, b = cursor, cursor + len(token)
+                    if b > inicio and a < fin:
+                        seleccion.append(w)
+                    cursor = b + 1
+            if seleccion:
+                confs = [float(w.get("confianza", 0)) for w in seleccion if w.get("confianza") is not None]
+                media = round(sum(confs)/len(confs), 2) if confs else None
+                candidato = {"pagina": linea.get("pagina"), "geometria_valor": bbox_union(seleccion),
+                             "confianza_ocr": media, "texto_ocr": " ".join(str(w.get("texto", "")) for w in seleccion)}
+                if mejor is None or (media or 0) > (mejor.get("confianza_ocr") or 0):
+                    mejor = candidato
+        if mejor:
+            item.update(mejor)
+            item["confianza"] = mejor.get("confianza_ocr")
+            item["metodo"] = "patron_regex_con_evidencia_geometrica_v12"
+
+    # Los códigos numéricos ya se asocian espacialmente a su etiqueta en V11.
+    # Se propagan sus coordenadas y confianza, que antes se descartaban al formar el JSON final.
+    for campo in ("identificador_electronico", "codigo_verificacion"):
+        for item in resultados.get(campo, []):
+            if all(k in item for k in ("x", "y", "w", "h")):
+                item["geometria_valor"] = {k: int(item[k]) for k in ("x", "y", "w", "h")}
+                item["pagina"] = item.get("pagina", 1)
+                item["confianza_ocr"] = item.get("confianza")
+                item["metodo"] = "patron_regex_etiqueta_espacial_con_evidencia_v12"
+    return resultados
+
+
+# ---------------- V6: FILAS Y ASOCIACIÓN POR ETIQUETAS ----------------
+
+def _centro_y(item):
+    return item["y"] + item["h"] / 2.0
+
+
+def lineas_geometricas(palabras):
+    """
+    Reconstruye filas visuales a partir de las cajas OCR.
+    No depende de block/par/line de Tesseract ni de coordenadas absolutas.
+    """
+    if not palabras:
+        return []
+
+    ordenadas = sorted(palabras, key=lambda p: (_centro_y(p), p["x"]))
+    grupos = []
+
+    for p in ordenadas:
+        cy = _centro_y(p)
+        mejor = None
+        mejor_dist = None
+
+        # Buscar entre todas las filas recientes; la tolerancia depende
+        # de la altura real de letra de cada documento.
+        for g in reversed(grupos[-20:]):
+            gy = float(np.median([_centro_y(z) for z in g]))
+            gh = float(np.median([z["h"] for z in g]))
+            ph = float(p["h"])
+            tol = max(7.0, min(26.0, 0.62 * max(gh, ph)))
+            d = abs(cy - gy)
+            if d <= tol and (mejor_dist is None or d < mejor_dist):
+                mejor, mejor_dist = g, d
+
+        if mejor is None:
+            grupos.append([p])
+        else:
+            mejor.append(p)
+
+    lineas = []
+    for grupo in grupos:
+        grupo = sorted(grupo, key=lambda z: z["x"])
+        x1 = min(z["x"] for z in grupo)
+        y1 = min(z["y"] for z in grupo)
+        x2 = max(z["x"] + z["w"] for z in grupo)
+        y2 = max(z["y"] + z["h"] for z in grupo)
+        texto = " ".join(z["texto"] for z in grupo)
+        lineas.append({
+            "texto": texto,
+            "texto_norm": normalizar(texto),
+            "x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1,
+            "confianza": round(float(np.mean([z["confianza"] for z in grupo])), 2),
+            "pagina": grupo[0]["pagina"],
+            "palabras": grupo
+        })
+
+    return sorted(lineas, key=lambda z: (z["pagina"], z["y"], z["x"]))
+
+
+def _tokens_norm(palabras):
+    salida = []
+    for p in sorted(palabras, key=lambda z: z["x"]):
+        t = normalizar(p["texto"])
+        if t:
+            salida.append((t, p))
+    return salida
+
+
+def _buscar_etiqueta_v6(linea, aliases, umbral=0.78):
+    """
+    Busca frases en secuencias de tokens y admite errores OCR moderados.
+    Devuelve geometría ajustada a las palabras que forman la etiqueta.
+    """
+    tokens = _tokens_norm(linea["palabras"])
+    textos = [t for t, _ in tokens]
+    mejor = None
+
+    for alias in aliases:
+        objetivo = normalizar(alias).split()
+        if not objetivo:
+            continue
+
+        for inicio in range(len(textos)):
+            for largo in range(max(1, len(objetivo)-1), len(objetivo)+2):
+                fin = inicio + largo
+                if fin > len(textos):
+                    continue
+                ventana = textos[inicio:fin]
+                score = SequenceMatcher(
+                    None, " ".join(ventana), " ".join(objetivo)
+                ).ratio()
+                # Las etiquetas de una sola palabra (p. ej. Sexo) no deben
+                # confundirse con ruido OCR del margen.
+                umbral_local = max(0.90, umbral) if len(objetivo) == 1 else max(0.80, umbral)
+                if score < umbral_local:
+                    continue
+
+                subset = [tokens[k][1] for k in range(inicio, fin)]
+                x1 = min(z["x"] for z in subset)
+                y1 = min(z["y"] for z in subset)
+                x2 = max(z["x"] + z["w"] for z in subset)
+                y2 = max(z["y"] + z["h"] for z in subset)
+                candidato = {
+                    "alias": alias, "score": score,
+                    "x": x1, "y": y1, "w": x2-x1, "h": y2-y1,
+                    "cx": (x1+x2)/2, "cy": (y1+y2)/2
+                }
+                if mejor is None or score > mejor["score"]:
+                    mejor = candidato
+
+    return mejor
+
+
+def _texto_valido_v6(campo, palabras):
+    palabras = sorted(
+        [z for z in palabras if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]{2,}", z["texto"])],
+        key=lambda z: z["x"]
+    )
+    if not palabras:
+        return None
+    texto = " ".join(z["texto"] for z in palabras).strip()
+    compacto = re.sub(r"\s+", "", texto)
+
+    if campo == "folio":
+        ok = bool(re.fullmatch(r"\d{7,12}", compacto))
+        detalle = "Folio numérico" if ok else "Folio no válido"
+    else:
+        ok, detalle = validar_formato(campo, texto)
+
+    if not ok:
+        return None
+
+    return {
+        "valor": compacto if campo in ("oficialia", "libro", "numero_acta", "folio") else texto,
+        "confianza": round(float(np.mean([z["confianza"] for z in palabras])), 2),
+        "detalle_validacion": detalle,
+        "geometria_valor": {
+            "x": min(z["x"] for z in palabras),
+            "y": min(z["y"] for z in palabras),
+            "w": max(z["x"] + z["w"] for z in palabras) - min(z["x"] for z in palabras),
+            "h": max(z["y"] + z["h"] for z in palabras) - min(z["y"] for z in palabras)
+        }
+    }
+
+
+def _candidatos_misma_columna_v6(lineas, etiqueta, campo, direccion,
+                                 max_factor=3.2):
+    """
     Busca el valor inmediatamente arriba/abajo de una etiqueta.
     Las distancias y tolerancias se calculan con la altura de texto local.
     """
@@ -849,8 +1401,11 @@ def extraer_patrones_v5(lineas):
 # ---------------- V8: OCR LOCAL POR ETIQUETA ----------------
 
 def ocr_local_etiquetas_v7(imagen, palabras, pagina_num):
-  
-
+    """
+    Relee regiones próximas a etiquetas conocidas con PSM 7/6.
+    Recupera valores pequeños que el OCR de página completa omitió.
+    Las coordenadas de salida se convierten nuevamente a coordenadas de página.
+    """
     lineas = lineas_geometricas(palabras)
     configuraciones = [
         ("folio", ["folio"], "0123456789"),
@@ -918,7 +1473,196 @@ def ocr_local_etiquetas_v7(imagen, palabras, pagina_num):
                         "pagina": pagina_num, "psm": f"local{psm}"
                     })
     return extras
-    
+
+
+def _candidatos_misma_columna_v7(lineas, etiqueta, campo, direccion, max_factor=3.2):
+    """
+    Selecciona palabras por banda vertical del candidato, no toda la línea
+    geométrica. Excluye las cajas de la etiqueta y agrupa solo tokens cercanos
+    al mismo renglón del valor.
+    """
+    alturas = [p["h"] for l in lineas for p in l["palabras"] if p["h"] > 0]
+    altura_ref = float(np.median(alturas)) if alturas else 18.0
+    max_dist = max(35.0, min(135.0, altura_ref * max_factor))
+    tol_x = max(75.0, min(260.0, etiqueta["w"] * 0.90))
+    candidatos = []
+
+    for linea in lineas:
+        for p in linea["palabras"]:
+            px1, py1 = p["x"], p["y"]
+            px2, py2 = px1+p["w"], py1+p["h"]
+            ex1, ey1 = etiqueta["x"], etiqueta["y"]
+            ex2, ey2 = ex1+etiqueta["w"], ey1+etiqueta["h"]
+            if min(px2,ex2)>max(px1,ex1) and min(py2,ey2)>max(py1,ey1):
+                continue
+            cx = px1+p["w"]/2
+            cy = py1+p["h"]/2
+            delta = etiqueta["cy"]-cy if direccion=="arriba" else cy-etiqueta["cy"]
+            if not (2 <= delta <= max_dist) or abs(cx-etiqueta["cx"]) > tol_x:
+                continue
+            if p["confianza"] < 15:
+                continue
+
+            # Solo palabras en la misma banda vertical que el candidato.
+            banda = max(12.0, min(30.0, altura_ref*0.65))
+            zona = []
+            for q in linea["palabras"]:
+                qcx = q["x"]+q["w"]/2
+                qcy = q["y"]+q["h"]/2
+                # Excluir cualquier token que intersecte la etiqueta.
+                qx1,qy1,qx2,qy2=q["x"],q["y"],q["x"]+q["w"],q["y"]+q["h"]
+                overlap = min(qx2,ex2)>max(qx1,ex1) and min(qy2,ey2)>max(qy1,ey1)
+                if overlap:
+                    continue
+                if abs(qcy-cy) <= banda and abs(qcx-etiqueta["cx"]) <= tol_x and q["confianza"] >= 15:
+                    zona.append(q)
+
+            # No mezclar tokens muy alejados horizontalmente: mantener
+            # únicamente el grupo contiguo más cercano al centro de la etiqueta.
+            zona = sorted(zona,key=lambda z:z["x"])
+            if not zona:
+                zona=[p]
+            grupos=[]
+            for q in zona:
+                if not grupos or q["x"]-(grupos[-1][-1]["x"]+grupos[-1][-1]["w"]) > max(35,altura_ref*1.8):
+                    grupos.append([q])
+                else:
+                    grupos[-1].append(q)
+            for grupo in grupos:
+                if not any(q is p for q in grupo) and len(grupo)>1:
+                    continue
+                dato=_texto_valido_v6(campo,grupo)
+                if dato:
+                    score=(1.0-delta/max_dist)*0.55+(float(np.mean([q["confianza"] for q in grupo]))/100)*0.45
+                    candidatos.append((score,delta,dato))
+
+    if not candidatos:
+        return None
+    candidatos.sort(key=lambda z:(z[0],-z[1]),reverse=True)
+    score,delta,dato=candidatos[0]
+    dato.update({
+        "puntuacion_asociacion":round(score,3),
+        "distancia_etiqueta_valor":round(delta,1),
+        "geometria_etiqueta":{k:etiqueta[k] for k in ("x","y","w","h")}
+    })
+    return dato
+
+
+
+def _extraer_campos_tabla_v6(lineas, pagina):
+    campos = {}
+    config = {
+        "oficialia": (["oficialia", "oficialía", "numero de oficialia"], "abajo"),
+        "fecha_registro": (["fecha de registro", "fecha registro"], "abajo"),
+        "libro": (["libro", "numero de libro"], "abajo"),
+        "numero_acta": (["numero de acta", "número de acta", "num de acta"], "abajo")
+    }
+
+    ls = [l for l in lineas if l["pagina"] == pagina]
+    etiquetas = []
+    for linea in ls:
+        for campo, (aliases, direccion) in config.items():
+            e = _buscar_etiqueta_v6(linea, aliases)
+            if e:
+                etiquetas.append((campo, linea, e, direccion))
+
+    for campo, linea, e, direccion in etiquetas:
+        dato = _candidatos_misma_columna_v7(ls, e, campo, direccion, 3.8)
+        if dato:
+            dato.update({
+                "metodo": "v6_tabla_etiqueta_columna_dinamica",
+                "etiqueta_detectada": e["alias"],
+                "pagina": pagina,
+                "validacion_humana": "pendiente",
+                "estado": "requiere_confirmacion"
+            })
+            previo = campos.get(campo)
+            if previo is None or dato["confianza"] > previo["confianza"]:
+                campos[campo] = dato
+
+    # Folio: siempre asociado a la palabra FOLIO, nunca a cualquier número.
+    for linea in ls:
+        e = _buscar_etiqueta_v6(linea, ["folio"])
+        if not e:
+            continue
+        dato = _candidatos_misma_columna_v7(ls, e, "folio", "abajo", 4.0)
+        if dato:
+            dato.update({
+                "metodo": "v6_folio_asociado_a_etiqueta",
+                "etiqueta_detectada": "FOLIO",
+                "pagina": pagina,
+                "validacion_humana": "pendiente",
+                "estado": "requiere_confirmacion"
+            })
+            campos["folio"] = dato
+        break
+
+    return campos
+
+
+
+def _extraer_persona_v6(lineas, pagina):
+    ls = [l for l in lineas if l["pagina"] == pagina]
+    if not ls:
+        return {}
+
+    # Si OCR no reconoce el encabezado de sección, la repetición de Nombre(s)
+    # permite identificar dinámicamente el comienzo de filiación.
+    filas_nombre = []
+    for linea in ls:
+        if _buscar_etiqueta_v6(linea, ["nombre(s)", "nombres", "nombre"], 0.74):
+            filas_nombre.append(linea)
+    corte_filiacion = filas_nombre[1]["y"] if len(filas_nombre) >= 2 else None
+    bloque = [l for l in ls if corte_filiacion is None or l["y"] < corte_filiacion]
+
+    etiquetas = {
+        "nombre": ["nombre(s)", "nombres", "nombre"],
+        "primer_apellido": ["primer apellido", "primerapellido"],
+        "segundo_apellido": ["segundo apellido", "segundoapellido"],
+        "sexo": ["sexo"],
+        "fecha_nacimiento": ["fecha de nacimiento", "fechadenacimiento"],
+        "lugar_nacimiento": ["lugar de nacimiento", "lugardenacimiento"]
+    }
+
+    salida = {}
+    for campo, aliases in etiquetas.items():
+        for linea in bloque:
+            e = _buscar_etiqueta_v6(linea, aliases, 0.74)
+            if not e:
+                continue
+            dato = _candidatos_misma_columna_v7(bloque, e, campo, "arriba", 5.0)
+            if dato:
+                dato.update({
+                    "metodo": "v6_persona_etiqueta_columna",
+                    "etiqueta_detectada": e["alias"],
+                    "pagina": pagina,
+                    "validacion_humana": "pendiente",
+                    "estado": "requiere_confirmacion"
+                })
+                if campo not in salida or dato["confianza"] > salida[campo]["confianza"]:
+                    salida[campo] = dato
+            break
+    return salida
+
+
+def extraer_por_secciones_v5(lineas, celdas=None):
+    """
+    Interfaz compatible con el pipeline anterior.
+    V6 reconstruye filas y asocia valores localmente a cada etiqueta.
+    """
+    salida = {}
+    paginas = sorted(set(l["pagina"] for l in lineas))
+    for pagina in paginas:
+        if celdas:
+            celdas_pagina = [c for c in celdas if c.get("pagina", pagina) == pagina]
+            salida.update(_extraer_tabla_celdas_v6(celdas_pagina, pagina))
+        salida.update(_extraer_campos_tabla_v6(lineas, pagina))
+        persona = _extraer_persona_v6(lineas, pagina)
+        for campo, dato in persona.items():
+            anterior = salida.get(campo)
+            if anterior is None or dato["confianza"] > anterior.get("confianza", 0):
+                salida[campo] = dato
+
         # Nacionalidad pertenece a filiación, no a la persona registrada.
         ls = [l for l in lineas if l["pagina"] == pagina]
         en_filiacion = False
@@ -1037,6 +1781,367 @@ def extraer_registro_v8(gris, palabras, pagina=1, carpeta_evidencias=None):
 
 
 # ---------------- V8: EXTRACCION POR FILAS Y CELDAS SEMANTICAS ----------------
+
+def _centro_token_v8(p):
+    return p["x"] + p["w"] / 2, p["y"] + p["h"] / 2
+
+
+def _lineas_etiquetas_v8(palabras):
+    """Reconstruye líneas de etiquetas a partir de OCR PSM 6/11."""
+    return lineas_geometricas(palabras)
+
+
+def _hallar_etiquetas_v8(lineas, aliases, umbral=0.76):
+    halladas = []
+    for linea in lineas:
+        e = _buscar_etiqueta_v6(linea, aliases, umbral)
+        if e:
+            e["linea_y"] = linea["y"]
+            e["linea_h"] = linea["h"]
+            halladas.append(e)
+    # Evitar duplicados PSM6/PSM11 casi coincidentes.
+    salida = []
+    for e in sorted(halladas, key=lambda z: (-z["score"], z["y"], z["x"])):
+        if not any(abs(e["cx"]-q["cx"]) < 35 and abs(e["cy"]-q["cy"]) < 24 for q in salida):
+            salida.append(e)
+    return sorted(salida, key=lambda z: (z["cy"], z["cx"]))
+
+
+def _filas_candidatas_v8(palabras, y_max, y_min, x_min, x_max):
+    """Agrupa tokens OCR en renglones dentro de una celda delimitada."""
+    tokens = []
+    for p in palabras:
+        cx, cy = _centro_token_v8(p)
+        if not (y_min <= cy < y_max and x_min <= cx <= x_max):
+            continue
+        # Los límites x_min/x_max ya delimitan la columna actual.
+        # No aplicar topes absolutos: excluían columnas derechas en páginas anchas.
+        if p["confianza"] < 25:
+            continue
+        if not re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]", p["texto"]):
+            continue
+        tokens.append(p)
+    tokens.sort(key=lambda z: (z["y"]+z["h"]/2, z["x"]))
+    filas=[]
+    for p in tokens:
+        cy=p["y"]+p["h"]/2
+        destino=None
+        for fila in reversed(filas[-5:]):
+            fy=float(np.median([q["y"]+q["h"]/2 for q in fila]))
+            tol=max(8,min(22,0.65*max(p["h"],float(np.median([q["h"] for q in fila])))))
+            if abs(cy-fy)<=tol:
+                destino=fila; break
+        if destino is None: filas.append([p])
+        else: destino.append(p)
+    return [sorted(f,key=lambda z:z["x"]) for f in filas]
+
+
+def _extraer_valor_celda_v8(palabras, etiqueta, etiquetas_misma_fila, campo,
+                            ancho_pagina, alto_pagina, max_delta=105):
+    """Asocia el renglón de valor inmediatamente superior a la etiqueta.
+
+    Los límites horizontales se calculan con los centros de las etiquetas
+    vecinas de la misma fila; no se reutiliza texto de columnas adyacentes.
+    """
+    centros=sorted(e["cx"] for e in etiquetas_misma_fila)
+    centro=etiqueta["cx"]
+    idx=min(range(len(centros)),key=lambda i:abs(centros[i]-centro))
+    if len(centros)==1:
+        x_min=max(60,centro-200); x_max=min(ancho_pagina-60,centro+200)
+    else:
+        x_min=60 if idx==0 else (centros[idx-1]+centro)/2
+        x_max=ancho_pagina-60 if idx==len(centros)-1 else (centro+centros[idx+1])/2
+    # Un pequeño margen interior reduce cruces por columnas.
+    margen=max(5,(x_max-x_min)*0.015)
+    x_min+=margen; x_max-=margen
+    y_max=etiqueta["y"]-2
+    y_min=max(0, y_max-max_delta)
+    filas=_filas_candidatas_v8(palabras,y_max,y_min,x_min,x_max)
+    if not filas: return None
+
+    candidatos=[]
+    for fila in filas:
+        cy=float(np.median([p["y"]+p["h"]/2 for p in fila]))
+        delta=etiqueta["cy"]-cy
+        if delta<=0: continue
+        texto=" ".join(p["texto"] for p in fila).strip()
+        # Reglas de contenido y limpieza por campo.
+        if campo in ("fecha_nacimiento",):
+            m=re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b",texto)
+            if not m: continue
+            valor=m.group(0)
+            usados=[p for p in fila if re.search(r"\d",p["texto"])]
+        elif campo=="lugar_nacimiento":
+            # Permite varias palabras, exige texto alfabético y descarta guiones.
+            usados=[p for p in fila if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}",p["texto"])]
+            valor=" ".join(p["texto"] for p in usados)
+        elif campo=="nacionalidad":
+            usados=[p for p in fila if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3,}",p["texto"])]
+            valor=" ".join(p["texto"] for p in usados)
+        else:
+            usados=[p for p in fila if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}",p["texto"])]
+            valor=" ".join(p["texto"] for p in usados)
+        if not usados: continue
+        valor=re.sub(r"\s+"," ",valor).strip(" -_.,:;")
+        if not valor: continue
+        # Evitar etiquetas confundidas con valores.
+        if normalizar(valor) in {"nombre", "nombres", "primer apellido", "segundo apellido",
+                                 "sexo", "fecha de nacimiento", "lugar de nacimiento", "nacionalidad"}:
+            continue
+        conf=float(np.mean([p["confianza"] for p in usados]))
+        # La distancia vertical y la alineación dentro de la celda ponderan.
+        score=0.55*(1-min(delta/max_delta,1))+0.45*(conf/100)
+        candidatos.append((score,delta,valor,usados))
+    if not candidatos: return None
+    candidatos.sort(key=lambda z:(z[0],-z[1]),reverse=True)
+    score,delta,valor,usados=candidatos[0]
+    if campo=="fecha_nacimiento":
+        # Formato uniforme DD/MM/AAAA
+        valor=valor.replace("-","/")
+    if campo in ("nombre","primer_apellido","segundo_apellido","sexo","nacionalidad"):
+        valor=valor.upper()
+    x1=min(p["x"] for p in usados); y1=min(p["y"] for p in usados)
+    x2=max(p["x"]+p["w"] for p in usados); y2=max(p["y"]+p["h"] for p in usados)
+    return {
+        "valor":valor,"confianza":round(float(np.mean([p["confianza"] for p in usados])),2),
+        "metodo":"v9_fila_celda_semantica","puntuacion_asociacion":round(score,3),
+        "distancia_etiqueta_valor":round(delta,1),
+        "geometria_valor":{"x":x1,"y":y1,"w":x2-x1,"h":y2-y1},
+        "geometria_etiqueta":{"x":etiqueta["x"],"y":etiqueta["y"],"w":etiqueta["w"],"h":etiqueta["h"]},
+        "validacion_humana":"pendiente","estado":"requiere_confirmacion"
+    }
+
+
+def extraer_personales_v8(palabras, ancho_pagina, alto_pagina, carpeta_evidencias=None, imagen=None):
+    """Extrae persona registrada y filiación por bandas de etiquetas y columnas."""
+    lineas=_lineas_etiquetas_v8(palabras)
+    salida={}
+    definiciones={
+        "nombre":(["nombre(s)","nombres"],"persona_nombre"),
+        "primer_apellido":(["primer apellido","primerapellido"],"persona_apellido1"),
+        "segundo_apellido":(["segundo apellido","segundoapellido"],"persona_apellido2"),
+        "sexo":(["sexo"],"persona_sexo"),
+        "fecha_nacimiento":(["fecha de nacimiento","fechadenacimiento"],"persona_fecha"),
+        "lugar_nacimiento":(["lugar de nacimiento","lugardenacimiento"],"persona_lugar"),
+        "nacionalidad":(["nacionalidad"],"filiacion_nacionalidad")
+    }
+    etiquetas={campo:_hallar_etiquetas_v8(lineas,aliases,0.74) for campo,(aliases,_) in definiciones.items()}
+    # Delimitar las secciones con sus encabezados; evita confundir el texto
+    # superior "Número de Certificado de Nacimiento" con etiquetas personales.
+    y_persona=0.0; y_filiacion=float(alto_pagina)
+    for linea in lineas:
+        norm=linea.get("texto_norm","")
+        if "datos de la persona registrada" in norm:
+            y_persona=linea["y"]+linea["h"]
+        if "datos de filiacion de la persona registrada" in norm or "datos de filiacion" in norm:
+            y_filiacion=min(y_filiacion,linea["y"])
+    if y_persona==0.0:
+        y_persona=alto_pagina*0.27
+    if y_filiacion==alto_pagina:
+        y_filiacion=alto_pagina*0.43
+    for campo in ("nombre","primer_apellido","segundo_apellido","sexo","fecha_nacimiento","lugar_nacimiento"):
+        etiquetas[campo]=[e for e in etiquetas[campo] if y_persona < e["cy"] < y_filiacion]
+    # Solo aceptar nacionalidad dentro de la sección de la persona registrada.
+    # Las etiquetas posteriores al encabezado de filiación corresponden a los padres.
+    etiquetas["nacionalidad"]=[e for e in etiquetas["nacionalidad"] if y_persona < e["cy"] < y_filiacion]
+
+    # Persona registrada: primera aparición de Nombre(s), sexo/fecha/lugar.
+    grupos=[]
+    for campo in ("nombre","primer_apellido","segundo_apellido"):
+        if etiquetas[campo]:
+            e=etiquetas[campo][0]
+            existente=next((g for g in grupos if abs(g[0]["cy"]-e["cy"])<32),None)
+            if existente is None: grupos.append([e])
+            else: existente.append(e)
+    # Completar las etiquetas del primer renglón con el primer match de cada tipo.
+    fila_nombre=sorted([etiquetas[c][0] for c in ("nombre","primer_apellido","segundo_apellido") if etiquetas[c]],key=lambda z:z["cx"])
+    for campo in ("nombre","primer_apellido","segundo_apellido"):
+        if etiquetas[campo] and fila_nombre:
+            dato=_extraer_valor_celda_v8(palabras,etiquetas[campo][0],fila_nombre,campo,ancho_pagina,alto_pagina,95)
+            if dato: salida[campo]=dato
+
+    fila_datos=[]
+    for campo in ("sexo","fecha_nacimiento","lugar_nacimiento"):
+        if etiquetas[campo]: fila_datos.append(etiquetas[campo][0])
+    fila_datos=sorted(fila_datos,key=lambda z:z["cx"])
+    for campo in ("sexo","fecha_nacimiento","lugar_nacimiento"):
+        if etiquetas[campo] and fila_datos:
+            dato=_extraer_valor_celda_v8(palabras,etiquetas[campo][0],fila_datos,campo,ancho_pagina,alto_pagina,100)
+            if dato: salida[campo]=dato
+
+    # Nacionalidad: solo se extrae si la etiqueta está dentro de la sección
+    # de la persona registrada. Nunca heredar nacionalidad de madre/padre.
+    if etiquetas["nacionalidad"]:
+        e=etiquetas["nacionalidad"][0]
+        dato=_extraer_valor_celda_v8(palabras,e,[e],"nacionalidad",ancho_pagina,alto_pagina,100)
+        if dato: salida["nacionalidad"]=dato
+
+    # Evidencia visual independiente por campo: crop original + caja detectada.
+    if carpeta_evidencias is not None and imagen is not None:
+        evdir=Path(carpeta_evidencias)/"evidencias_v12"
+        evdir.mkdir(parents=True,exist_ok=True)
+        for campo,dato in salida.items():
+            g=dato.get("geometria_valor")
+            if not g: continue
+            x,y,w,h=(g[k] for k in ("x","y","w","h"))
+            pad_x=max(18,int(w*.18)); pad_y=max(18,int(h*.8))
+            x1=max(0,x-pad_x); y1=max(0,y-pad_y)
+            x2=min(imagen.shape[1],x+w+pad_x); y2=min(imagen.shape[0],y+h+pad_y)
+            crop=imagen[y1:y2,x1:x2]
+            if crop.size:
+                cv2.imwrite(str(evdir/f"{campo}.png"),crop)
+        overlay=cv2.cvtColor(imagen,cv2.COLOR_GRAY2BGR)
+        for campo,dato in salida.items():
+            g=dato.get("geometria_valor")
+            if g:
+                x,y,w,h=(g[k] for k in ("x","y","w","h"))
+                cv2.rectangle(overlay,(x,y),(x+w,y+h),(0,0,255),2)
+                cv2.putText(overlay,campo,(x,max(20,y-8)),cv2.FONT_HERSHEY_SIMPLEX,.55,(0,0,255),1,cv2.LINE_AA)
+        cv2.imwrite(str(evdir/"pagina_001_campos_v12.png"),overlay)
+    return salida
+
+
+# ---------------- PROCESAMIENTO ----------------
+
+def procesar(ruta, poppler_path=None):
+    paginas = cargar_paginas(ruta, poppler_path)
+    nombre = Path(ruta).stem
+    carpeta = SALIDA / nombre
+    carpeta.mkdir(parents=True, exist_ok=True)
+
+    paginas_resultado = []
+    todas_palabras = []
+    todas_palabras_v8 = []
+    todas_celdas = []
+    campos_registro_v8 = {}
+
+    for numero, pagina in enumerate(paginas, start=1):
+        print(f"\nProcesando página {numero}...")
+        gris, mejorada = preparar(pagina)
+        corregida, angulo = corregir_inclinacion(mejorada)
+
+        # Dos modos complementarios: texto disperso y bloques uniformes.
+        p11 = ocr_pagina_config(corregida, numero, 11)
+        # V8 usa PSM6 sobre gris sin CLAHE: preserva trazos finos en datos personales.
+        p6_v8 = ocr_pagina_config(gris, numero, 6)
+        palabras = combinar_palabras_ocr(p11, p6_v8)
+        todas_palabras_v8.extend(p6_v8)
+        # V8 evita el barrido local masivo de V7: los campos personales se
+        # releen en regiones semánticas y los registrales usan OCR/tablas.
+        extras_locales = []
+        lineas = lineas_geometricas(palabras)
+
+        # V8 detecta la rejilla, pero solo ejecuta OCR en las cuatro celdas
+        # registrales; evita el barrido costoso de todas las cajas del documento.
+        registro_pagina, rejilla = extraer_registro_v8(gris, p6_v8, numero, carpeta)
+        if numero == 1:
+            campos_registro_v8 = registro_pagina
+        else:
+            campos_registro_v8.update(registro_pagina)
+        celdas_leidas = []
+        todas_palabras.extend(palabras)
+
+        evidencia = cv2.cvtColor(corregida, cv2.COLOR_GRAY2BGR)
+        for p in palabras:
+            x, y, w, h = p["x"], p["y"], p["w"], p["h"]
+            cv2.rectangle(evidencia, (x, y), (x+w, y+h), (0, 0, 255), 1)
+        cv2.imwrite(str(carpeta / f"pagina_{numero:03d}_ocr_v12.png"), evidencia)
+        cv2.imwrite(str(carpeta / f"pagina_{numero:03d}_rejilla_v12.png"), rejilla)
+
+        paginas_resultado.append({
+            "pagina": numero,
+            "angulo_corregido": round(angulo, 3),
+            "palabras_ocr": len(palabras),
+            "lineas_geometricas": len(lineas),
+            "celdas_detectadas": len(celdas_leidas),
+            "lineas": lineas,
+            "celdas": celdas_leidas
+        })
+
+    todas_lineas = []
+    for p in paginas_resultado:
+        todas_lineas.extend(p["lineas"])
+
+    # Se conserva el extractor V7 para los campos registrales y patrones.
+    campos_extraidos = extraer_por_secciones_v5(todas_lineas, todas_celdas)
+    campos_extraidos.update(campos_registro_v8)
+    patrones = extraer_patrones_v5(todas_lineas)
+    patrones = adjuntar_evidencia_patrones(patrones, todas_lineas)
+    # V8 vuelve a leer los campos personales por celdas semánticas.
+    # Se procesa cada página para mantener sus coordenadas y evidencias.
+    campos_personales_v8 = {}
+    for idx, pagina in enumerate(paginas, start=1):
+        gris_v8, mejorada_v8 = preparar(pagina)
+        corregida_v8, _ = corregir_inclinacion(mejorada_v8)
+        palabras_pagina = [p for p in todas_palabras_v8 if p.get("pagina") == idx]
+        nuevos = extraer_personales_v8(
+            palabras_pagina, corregida_v8.shape[1], corregida_v8.shape[0],
+            carpeta_evidencias=carpeta, imagen=gris_v8
+        )
+        campos_personales_v8.update(nuevos)
+
+    # Mantener siempre el esquema esperado, incluso cuando requiera captura manual.
+    campos_requeridos = [
+        "oficialia", "fecha_registro", "libro", "numero_acta",
+        "nombre", "primer_apellido", "segundo_apellido",
+        "fecha_nacimiento", "sexo", "lugar_nacimiento", "nacionalidad",
+        "folio", "curp", "identificador_electronico", "codigo_verificacion"
+    ]
+    campos_finales = {}
+    for campo in campos_requeridos:
+        if campo in patrones and patrones[campo]:
+            opciones = patrones[campo]
+            principal = opciones[0]
+            campos_finales[campo] = {
+                **principal,
+                "alternativas": opciones[1:],
+                "formato_valido": True,
+                "detalle_validacion": "Coincide con patrón; evidencia OCR y asociación espacial disponibles cuando fueron localizadas",
+                "validacion_humana": "pendiente",
+                "estado": "requiere_confirmacion"
+            }
+        elif campo in campos_personales_v8 and campo in (
+            "nombre", "primer_apellido", "segundo_apellido", "fecha_nacimiento",
+            "sexo", "lugar_nacimiento", "nacionalidad"
+        ):
+            dato = campos_personales_v8[campo]
+            ok, detalle = validar_formato(campo, dato["valor"])
+            campos_finales[campo] = {
+                **dato, "formato_valido": ok, "detalle_validacion": detalle,
+                "alternativas": [], "validacion_humana": "pendiente",
+                "estado": "requiere_confirmacion" if ok else "captura_manual"
+            }
+        elif campo in campos_extraidos and campo not in (
+            "nombre", "primer_apellido", "segundo_apellido", "fecha_nacimiento",
+            "sexo", "lugar_nacimiento", "nacionalidad"
+        ):
+            dato = campos_extraidos[campo]
+            ok, detalle = validar_formato(campo, dato["valor"])
+            campos_finales[campo] = {
+                **dato, "formato_valido": ok,
+                "detalle_validacion": detalle,
+                "alternativas": [],
+                "validacion_humana": "pendiente",
+                "estado": "requiere_confirmacion" if ok else "captura_manual"
+            }
+        else:
+            detalle = "No se encontró una asociación estructural confiable"
+            if campo == "nacionalidad":
+                detalle = (
+                    "No hay etiqueta de nacionalidad dentro de Datos de la Persona Registrada; "
+                    "no se infiere de la nacionalidad de madre o padre"
+                )
+            campos_finales[campo] = {
+                "valor": None, "confianza": 0,
+                "metodo": "no_identificado",
+                "formato_valido": False,
+                "detalle_validacion": detalle,
+                "validacion_humana": "pendiente",
+                "estado": "captura_manual", "alternativas": []
+            }
+
+    # Auditoría de coherencia: nunca modifica ni sustituye valores OCR.
+    validaciones_cruzadas = []
     curp = (campos_finales.get("curp", {}).get("valor") or "").strip().upper()
     fecha_nac = (campos_finales.get("fecha_nacimiento", {}).get("valor") or "").strip()
     sexo = (campos_finales.get("sexo", {}).get("valor") or "").strip().upper()
@@ -1165,3 +2270,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Lector inteligente de actas mexicanas V12"
     )
+    parser.add_argument("documento", help="Ruta de PDF o imagen")
+    parser.add_argument(
+        "--poppler",
+        default=None,
+        help="Ruta opcional a la carpeta bin de Poppler"
+    )
+    args = parser.parse_args()
+    procesar(args.documento, args.poppler)
