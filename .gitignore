@@ -21,7 +21,10 @@ __pycache__/
 storage/
 procesados/
 evidencias/
+# Ignorar archivos JSON temporales, pero conservar dependencias del proyecto
 *.json
+!package.json
+!package-lock.json
 
 # Dependencias y archivos temporales
 node_modules/
