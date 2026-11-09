@@ -1,0 +1,146 @@
+.detalle-admin-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+.detalle-admin-edit-button,.detalle-admin-delete-button { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:39px; padding:0 12px; border-radius:7px; font:inherit; font-size:11px; font-weight:700; cursor:pointer; }
+.detalle-admin-edit-button { color:#1E1C1C; background:#F0EAE2; border:1px solid #C6A989; }
+.detalle-admin-edit-button:hover { background:#E8DCCB; }
+.detalle-admin-delete-button { color:#9D2D2D; background:#fff; border:1px solid #E2B9B9; }
+.detalle-admin-delete-button:hover { background:#FCEEEE; }
+.detalle-admin-delete-button:disabled { opacity:.6; cursor:wait; }
+.detalle-admin-error { display:flex; align-items:center; gap:9px; margin:0 0 17px; padding:12px 14px; border-radius:7px; background:#FCE8E8; color:#A12626; font-size:12px; }
+.detalle-admin-spinner { animation:detalle-admin-girar 1s linear infinite; }
+@keyframes detalle-admin-girar { to { transform:rotate(360deg); } }
+@media(max-width:800px) { .detalle-admin-actions { width:100%; justify-content:flex-start; } .detalle-admin-actions button { flex:1 1 auto; } }
+
+
+/* Confirmación institucional de eliminación permanente */
+.acta-confirmacion-fondo {
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(20, 18, 18, .58);
+  backdrop-filter: blur(3px);
+}
+
+.acta-confirmacion-modal {
+  width: min(100%, 490px);
+  padding: 30px;
+  border: 1px solid #E4DED6;
+  border-radius: 15px;
+  background: #FFFFFF;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .24);
+  color: #1E1C1C;
+  animation: acta-modal-aparecer .18s ease-out;
+}
+
+@keyframes acta-modal-aparecer {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.acta-confirmacion-icono {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 18px;
+  border: 1px solid #E7C7C4;
+  border-radius: 13px;
+  background: #FBF0EF;
+  color: #A43C36;
+}
+
+.acta-confirmacion-etiqueta {
+  color: #9B7660;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+}
+
+.acta-confirmacion-modal h2 {
+  margin: 8px 0 12px;
+  color: #1E1C1C;
+  font-size: 23px;
+  letter-spacing: -.3px;
+}
+
+.acta-confirmacion-modal > p {
+  margin: 0;
+  color: #625E5A;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.acta-confirmacion-nota {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 20px;
+  padding: 14px 15px;
+  border-left: 3px solid #C6A989;
+  border-radius: 7px;
+  background: #F7F4EF;
+  color: #55504A;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.acta-confirmacion-nota strong {
+  color: #302C28;
+  font-size: 12px;
+}
+
+.acta-confirmacion-acciones {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.acta-confirmacion-acciones button {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 15px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, transform .15s;
+}
+
+.acta-confirmacion-cancelar {
+  border: 1px solid #D8D4CE;
+  background: #FFFFFF;
+  color: #4A4848;
+}
+
+.acta-confirmacion-cancelar:hover {
+  background: #F6F5F2;
+}
+
+.acta-confirmacion-eliminar {
+  border: 1px solid #9D3430;
+  background: #A63B36;
+  color: #FFFFFF;
+}
+
+.acta-confirmacion-eliminar:hover {
+  border-color: #842B27;
+  background: #8F302C;
+}
+
+.acta-confirmacion-acciones button:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+
+@media (max-width: 520px) {
+  .acta-confirmacion-modal { padding: 23px 20px; }
+  .acta-confirmacion-acciones { flex-direction: column-reverse; }
+  .acta-confirmacion-acciones button { width: 100%; }
+}

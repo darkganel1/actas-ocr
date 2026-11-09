@@ -9,6 +9,10 @@ const authRoutes = require('./routes/auth.routes');
 const usuariosRoutes = require('./routes/usuarios.routes');
 const documentosRoutes = require('./routes/documentos.routes');
 const actasRoutes = require('./routes/actas.routes');
+const auditoriaRoutes = require('./routes/auditoria.routes');
+const actasAdminRoutes = require('./routes/actas-admin.routes');
+
+
 const app = express();
 
 app.disable('x-powered-by');
@@ -46,6 +50,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/usuarios', usuariosRoutes);
 app.use('/api/documentos', documentosRoutes);
 app.use('/api/actas', actasRoutes);
+app.use('/api/auditoria', auditoriaRoutes);
+   app.use('/api/actas', actasAdminRoutes);
+  
 app.use((req, res) => {
     res.status(404).json({
         success: false,

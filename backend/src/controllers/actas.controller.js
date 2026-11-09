@@ -3,8 +3,12 @@ const {
   guardarActa,
   listarActas,
   obtenerActaPorId,
-  obtenerDocumentoActa
+  obtenerDocumentoActa,
+  actualizarActaPorAdministrador,
+  eliminarActaPermanentemente
 } = require('../services/actas.service');
+const { registrarEventoAuditoria } = require('../services/auditoria-registro.service');
+const { validarPDF } = require('../services/pdf.validation.service');
 
 const crearActa = async (req, res) => {
   try {
@@ -15,20 +19,9 @@ const crearActa = async (req, res) => {
       });
     }
 
-    const firmaPDF = req.file.buffer
-      .subarray(0, 5)
-      .toString('ascii');
+    // Valida extensión, encabezado, EOF y estructura real con Poppler/pdfinfo.
+    await validarPDF(req.file);
 
-    if (
-      !req.file.originalname.toLowerCase().endsWith('.pdf') ||
-      firmaPDF !== '%PDF-'
-    ) {
-      return res.status(400).json({
-        success: false,
-        mensaje: 'El archivo seleccionado no es un PDF válido.'
-      });
-    }
-   
     let datos;
 
     try {
@@ -57,7 +50,7 @@ const crearActa = async (req, res) => {
   } catch (error) {
     console.error('Error al guardar acta:', error);
 
-    return res.status(400).json({
+    return res.status(error.statusCode || 400).json({
       success: false,
       mensaje: error.message || 'No fue posible guardar el acta.'
     });
@@ -105,6 +98,16 @@ const consultarActa = async (req, res) => {
       });
     }
 
+    // Auditar antes de entregar los datos personales del expediente.
+    await registrarEventoAuditoria({
+      idUsuario: req.usuario.id_usuario,
+      accion: 'CONSULTAR',
+      entidad: 'actas',
+      idRegistro: id,
+      valorNuevo: { id_acta: id },
+      detalle: 'Consulta del expediente de acta por un usuario autorizado.'
+    });
+
     return res.json({
       success: true,
       acta
@@ -148,6 +151,16 @@ const visualizarDocumento = async (req, res) => {
       });
     }
 
+    // Auditar antes de transmitir el documento privado.
+    await registrarEventoAuditoria({
+      idUsuario: req.usuario.id_usuario,
+      accion: 'VISUALIZAR_DOCUMENTO',
+      entidad: 'documentos',
+      idRegistro: documento.id_documento,
+      valorNuevo: { id_acta: id, id_documento: documento.id_documento },
+      detalle: 'Visualización del PDF asociado a un acta.'
+    });
+
     const nombreSeguro = encodeURIComponent(
       documento.nombre_original.replace(/[\r\n"]/g, '_')
     );
@@ -170,9 +183,82 @@ const visualizarDocumento = async (req, res) => {
     });
   }
 };
+
+
+// Corrección administrativa de datos del acta (no reemplaza el PDF original).
+const actualizarActa = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        mensaje: 'El identificador del acta no es válido.'
+      });
+    }
+
+    const resultado = await actualizarActaPorAdministrador({
+      idActa: id,
+      datos: req.body,
+      idUsuario: req.usuario.id_usuario
+    });
+
+    return res.json({
+      success: true,
+      mensaje: resultado.actualizado
+        ? 'Acta actualizada correctamente.'
+        : 'No se detectaron cambios en el acta.',
+      ...resultado
+    });
+  } catch (error) {
+    console.error('Error al actualizar acta:', error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      mensaje: error.statusCode
+        ? error.message
+        : 'No fue posible actualizar el acta.'
+    });
+  }
+};
+
+// Eliminación física: borra acta, metadatos y PDF; conserva snapshot en bitácora.
+const eliminarActa = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        mensaje: 'El identificador del acta no es válido.'
+      });
+    }
+
+    const resultado = await eliminarActaPermanentemente({
+      idActa: id,
+      idUsuario: req.usuario.id_usuario
+    });
+
+    return res.json({
+      success: true,
+      mensaje: resultado.pdf_eliminado_fisicamente
+        ? 'El acta y su PDF fueron eliminados permanentemente. El historial permanece en la bitácora.'
+        : 'El registro fue eliminado, pero el PDF requiere una purga manual.',
+      ...resultado
+    });
+  } catch (error) {
+    console.error('Error al eliminar acta:', error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      mensaje: error.statusCode
+        ? error.message
+        : 'No fue posible eliminar el acta.'
+    });
+  }
+};
+
 module.exports = {
   crearActa,
   consultarActas,
   consultarActa,
-  visualizarDocumento
+  visualizarDocumento,
+  actualizarActa,
+  eliminarActa
 };

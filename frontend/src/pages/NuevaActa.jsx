@@ -212,6 +212,7 @@ export default function NuevaActa() {
   const [sha256, setSha256] = useState('');
   const [procesando, setProcesando] = useState(false);
   const [guardando, setGuardando] = useState(false);
+  const [mostrarConfirmacionDuplicado, setMostrarConfirmacionDuplicado] = useState(false);
   const [mensaje, setMensaje] = useState(null);
   const [errores, setErrores] = useState([]);
 
@@ -258,6 +259,7 @@ export default function NuevaActa() {
     setSha256('');
     setErrores([]);
     setMensaje(null);
+    setMostrarConfirmacionDuplicado(false);
   };
 
   const cambiarDato = (nombre, valor) => {
@@ -332,8 +334,8 @@ export default function NuevaActa() {
     }
   };
 
-  const guardarActa = async (e) => {
-    e.preventDefault();
+  const guardarActa = async (e, confirmarDuplicado = false) => {
+    e?.preventDefault();
 
     if (!archivo || !resultadoOCR) {
       setMensaje({
@@ -359,11 +361,13 @@ export default function NuevaActa() {
     setGuardando(true);
     setMensaje(null);
     setErrores([]);
+    if (confirmarDuplicado) setMostrarConfirmacionDuplicado(false);
 
     try {
       const formulario = new FormData();
       formulario.append('documento', archivo);
       formulario.append('datos', JSON.stringify(datos));
+      formulario.append('confirmarDuplicado', confirmarDuplicado ? 'true' : 'false');
 
       const respuesta = await api.post('/actas', formulario, {
         headers: {
@@ -376,13 +380,6 @@ export default function NuevaActa() {
         respuesta.data.id_acta ||
         respuesta.data.acta?.id_acta;
 
-      if (respuesta.data.duplicado) {
-        setMensaje({
-          tipo: 'advertencia',
-          texto: 'El documento ya existe en el sistema. Se registró la advertencia de duplicidad.'
-        });
-      }
-
       if (idActa) {
         navigate(`/actas/${idActa}`);
       } else {
@@ -392,6 +389,14 @@ export default function NuevaActa() {
         });
       }
     } catch (error) {
+      if (
+        error.response?.status === 409 &&
+        error.response?.data?.requiereConfirmacion
+      ) {
+        setMostrarConfirmacionDuplicado(true);
+        return;
+      }
+
       console.error('Error al guardar acta:', error);
 
       setMensaje({
@@ -414,6 +419,7 @@ export default function NuevaActa() {
     setSha256('');
     setErrores([]);
     setMensaje(null);
+    setMostrarConfirmacionDuplicado(false);
 
     const input = document.getElementById('archivo-pdf');
     if (input) input.value = '';
@@ -454,6 +460,128 @@ export default function NuevaActa() {
           <p>Procesamiento OCR y revisión de información registral</p>
         </div>
       </div>
+
+      
+{mostrarConfirmacionDuplicado && (
+  <div
+    style={{
+      position: 'fixed',
+      inset: 0,
+      zIndex: 999999,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px',
+      background: 'rgba(30, 28, 28, 0.68)',
+      backdropFilter: 'blur(4px)'
+    }}
+  >
+    <section
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="duplicado-titulo"
+      aria-describedby="duplicado-descripcion"
+      style={{
+        width: '100%',
+        maxWidth: '460px',
+        padding: '32px',
+        boxSizing: 'border-box',
+        background: '#FFFFFF',
+        border: '1px solid #E5E3DF',
+        borderRadius: '14px',
+        boxShadow: '0 20px 65px rgba(0,0,0,0.25)',
+        textAlign: 'center'
+      }}
+    >
+      <div
+        style={{
+          width: '66px',
+          height: '66px',
+          margin: '0 auto 20px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderRadius: '50%',
+          background: '#F5ECDF',
+          color: '#987345'
+        }}
+      >
+        <AlertCircle size={32} />
+      </div>
+
+      <h2
+        id="duplicado-titulo"
+        style={{
+          margin: '0 0 14px',
+          color: '#1E1C1C',
+          fontSize: '22px'
+        }}
+      >
+        Documento duplicado
+      </h2>
+
+      <p
+        id="duplicado-descripcion"
+        style={{
+          margin: 0,
+          color: '#6B6865',
+          fontSize: '14px',
+          lineHeight: 1.7
+        }}
+      >
+        Este PDF ya fue registrado anteriormente.
+        Verifica el acta existente antes de continuar.
+        </p>
+
+      <div
+        style={{
+          display: 'flex',
+          gap: '12px',
+          marginTop: '28px'
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setMostrarConfirmacionDuplicado(false)}
+          disabled={guardando}
+          style={{
+            flex: 1,
+            minHeight: '46px',
+            padding: '12px',
+            border: '1px solid #D8D5D0',
+            borderRadius: '7px',
+            background: '#FFFFFF',
+            color: '#4A4848',
+            fontWeight: 600,
+            cursor: 'pointer'
+          }}
+        >
+          Cancelar
+        </button>
+
+        <button
+          type="button"
+          onClick={() => guardarActa(null, true)}
+          disabled={guardando}
+          style={{
+            flex: 1,
+            minHeight: '46px',
+            padding: '12px',
+            border: '1px solid #C6A989',
+            borderRadius: '7px',
+            background: '#C6A989',
+            color: '#1E1C1C',
+            fontWeight: 700,
+            cursor: 'pointer'
+          }}
+        >
+          {guardando ? 'Guardando...' : 'Confirmar y guardar'}
+        </button>
+      </div>
+    </section>
+  </div>
+)}
+
 
       {mensaje && (
         <div className={`nueva-mensaje ${mensaje.tipo}`}>

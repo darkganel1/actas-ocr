@@ -1,0 +1,206 @@
+/* Acciones administrativas adicionales para el módulo de usuarios */
+.usuarios-admin-acciones {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.usuarios-admin-icono {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--light-gray, #DAD9D6);
+  border-radius: 7px;
+  background: var(--white, #FFFFFF);
+  color: var(--dark-gray, #4A4848);
+  cursor: pointer;
+  transition: background .18s, border-color .18s, color .18s;
+}
+
+.usuarios-admin-icono.editar:hover {
+  border-color: var(--gold, #C6A989);
+  background: #FAF7F2;
+  color: var(--charcoal, #1E1C1C);
+}
+
+.usuarios-admin-icono.password:hover {
+  border-color: #8B9BBA;
+  background: #F3F6FA;
+  color: #3C5578;
+}
+
+.usuarios-admin-icono:focus-visible,
+.usuarios-admin-confirmacion button:focus-visible,
+.usuarios-admin-modal button:focus-visible {
+  outline: 2px solid var(--gold, #C6A989);
+  outline-offset: 2px;
+}
+
+.usuarios-admin-overlay {
+  z-index: 1200;
+}
+
+.usuarios-admin-modal {
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+}
+
+.usuarios-admin-modal .usuarios-form-group input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.usuarios-admin-modal-pie {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+  flex-wrap: wrap;
+}
+
+.usuarios-admin-ayuda-password {
+  margin: 3px 0 0;
+  color: var(--medium-gray, #6B6865);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.usuarios-admin-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(20, 18, 18, .56);
+  backdrop-filter: blur(3px);
+}
+
+.usuarios-admin-confirmacion {
+  width: min(100%, 440px);
+  box-sizing: border-box;
+  padding: 30px;
+  border: 1px solid rgba(198, 169, 137, .35);
+  border-radius: 13px;
+  background: var(--white, #FFFFFF);
+  box-shadow: 0 22px 65px rgba(0, 0, 0, .22);
+  text-align: center;
+  animation: usuarios-admin-entrada .16s ease-out;
+}
+
+.usuarios-admin-confirm-icono {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  margin: 0 auto 17px;
+  border-radius: 15px;
+}
+
+.usuarios-admin-confirm-icono.desactivar {
+  background: #FBEFED;
+  color: #A4443E;
+}
+
+.usuarios-admin-confirm-icono.activar {
+  background: #EEF5EF;
+  color: #477A53;
+}
+
+.usuarios-admin-confirm-eyebrow {
+  color: var(--medium-gray, #6B6865);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.usuarios-admin-confirmacion h2 {
+  margin: 9px 0 10px;
+  color: var(--charcoal, #1E1C1C);
+  font-size: 22px;
+}
+
+.usuarios-admin-confirmacion > p {
+  margin: 0;
+  color: var(--dark-gray, #4A4848);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.usuarios-admin-confirm-nota {
+  margin-top: 18px;
+  padding: 13px 14px;
+  border-radius: 8px;
+  background: #F6F5F2;
+  color: var(--medium-gray, #6B6865);
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: left;
+}
+
+.usuarios-admin-confirmacion .usuarios-admin-modal-pie {
+  margin-top: 23px;
+}
+
+.usuarios-admin-boton-desactivar,
+.usuarios-admin-boton-activar {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 7px;
+  color: #FFFFFF;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity .18s, transform .18s;
+}
+
+.usuarios-admin-boton-desactivar {
+  background: #A4443E;
+}
+
+.usuarios-admin-boton-activar {
+  background: #477A53;
+}
+
+.usuarios-admin-boton-desactivar:hover,
+.usuarios-admin-boton-activar:hover {
+  opacity: .9;
+  transform: translateY(-1px);
+}
+
+.usuarios-admin-boton-desactivar:disabled,
+.usuarios-admin-boton-activar:disabled {
+  opacity: .55;
+  cursor: wait;
+  transform: none;
+}
+
+@keyframes usuarios-admin-entrada {
+  from { opacity: 0; transform: translateY(7px) scale(.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 600px) {
+  .usuarios-admin-confirmacion {
+    padding: 24px 19px;
+  }
+
+  .usuarios-admin-modal-pie {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .usuarios-admin-modal-pie button {
+    width: 100%;
+  }
+}
+
+.usuarios-admin-error-modal {
+  margin: 12px 0 16px;
+  text-align: left;
+}

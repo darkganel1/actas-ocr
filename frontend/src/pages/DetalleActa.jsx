@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
@@ -11,11 +10,40 @@ import {
   CalendarDays,
   MapPin,
   RefreshCw,
-  AlertCircle
+  AlertCircle,
+  Pencil,
+  Trash2,
+  LoaderCircle
 } from 'lucide-react';
 
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
+import './ActasAdmin.css';
+
+// Comparte la misma carga mientras está en curso. Evita doble consulta y doble
+// auditoría cuando React.StrictMode vuelve a montar el efecto en desarrollo.
+const solicitudesExpediente = new Map();
+
+function obtenerDatosExpediente(id) {
+  if (solicitudesExpediente.has(id)) return solicitudesExpediente.get(id);
+
+  const solicitud = Promise.all([
+    api.get(`/actas/${id}`),
+    api.get(`/actas/${id}/documento`, { responseType: 'blob' })
+  ]);
+
+  solicitudesExpediente.set(id, solicitud);
+  solicitud.then(
+    () => {
+      if (solicitudesExpediente.get(id) === solicitud) solicitudesExpediente.delete(id);
+    },
+    () => {
+      if (solicitudesExpediente.get(id) === solicitud) solicitudesExpediente.delete(id);
+    }
+  );
+
+  return solicitud;
+}
 
 const DetalleActa = () => {
   const { id } = useParams();
@@ -26,6 +54,9 @@ const DetalleActa = () => {
   const [pdfUrl, setPdfUrl] = useState('');
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState('');
+  const [errorAccion, setErrorAccion] = useState('');
+  const [eliminando, setEliminando] = useState(false);
+  const [confirmarEliminacion, setConfirmarEliminacion] = useState(false);
 
   useEffect(() => {
     let activo = true;
@@ -36,12 +67,7 @@ const DetalleActa = () => {
       setError('');
 
       try {
-        const [respuestaActa, respuestaPDF] = await Promise.all([
-          api.get(`/actas/${id}`),
-          api.get(`/actas/${id}/documento`, {
-            responseType: 'blob'
-          })
-        ]);
+        const [respuestaActa, respuestaPDF] = await obtenerDatosExpediente(id);
 
         if (!respuestaActa.data.success) {
           throw new Error('No fue posible recuperar el expediente.');
@@ -87,6 +113,48 @@ const DetalleActa = () => {
     };
   }, [id]);
 
+  const eliminarActa = async () => {
+    setEliminando(true);
+    setErrorAccion('');
+
+    try {
+      const respuesta = await api.delete(`/actas/${id}`);
+      if (!respuesta.data?.success) {
+        throw new Error(respuesta.data?.mensaje || 'No fue posible eliminar el acta.');
+      }
+
+      if (respuesta.data?.pdf_eliminado_fisicamente === false) {
+        setConfirmarEliminacion(false);
+        setErrorAccion(
+          respuesta.data?.advertencia ||
+          'El acta fue eliminada, pero el PDF requiere una purga manual.'
+        );
+        navigate('/actas', { replace: true, state: { avisoEliminacion: respuesta.data?.advertencia } });
+        return;
+      }
+
+      navigate('/actas', {
+        replace: true,
+        state: { avisoEliminacion: respuesta.data?.mensaje }
+      });
+    } catch (err) {
+      const status = err.response?.status;
+      const mensajeServidor =
+        err.response?.data?.mensaje ||
+        err.response?.data?.message;
+
+      setErrorAccion(
+        mensajeServidor ||
+        (status === 404
+          ? 'La ruta administrativa no está registrada en el backend. Verifica el montaje de actas-admin.routes.js en app.js.'
+          : err.message || 'No fue posible eliminar el acta.')
+      );
+    } finally {
+      setEliminando(false);
+      setConfirmarEliminacion(false);
+    }
+  };
+
   const mostrar = (valor) => {
     return valor === null || valor === undefined || valor === ''
       ? 'No registrado'
@@ -127,7 +195,7 @@ const DetalleActa = () => {
       <div className="detalle-error-page">
         <AlertCircle size={35} />
         <h2>No fue posible abrir el expediente</h2>
-        <p>{error || 'El expediente solicitado no está disponible.'}</p>
+        <p>{error || 'El expediente solicitado no estÃ¡ disponible.'}</p>
 
         <button onClick={() => navigate('/actas')}>
           <ArrowLeft size={17} />
@@ -150,7 +218,7 @@ const DetalleActa = () => {
         </div>
 
         <div className="sidebar-section">
-          MENÚ PRINCIPAL
+          MENÃš PRINCIPAL
         </div>
 
         <nav className="sidebar-nav">
@@ -173,14 +241,14 @@ const DetalleActa = () => {
 
         <button className="logout-button" onClick={cerrarSesion}>
           <ArrowLeft size={19} />
-          Cerrar sesión
+          Cerrar sesiÃ³n
         </button>
       </aside>
 
       <main className="dashboard-main">
 
         <header className="topbar">
-          <span>Sistema de Gestión Documental</span>
+          <span>Sistema de GestiÃ³n Documental</span>
 
           <div className="user-info">
             <div className="user-avatar">{inicial}</div>
@@ -196,24 +264,55 @@ const DetalleActa = () => {
           <div className="detalle-heading">
             <div>
               <span className="section-eyebrow">
-                GESTIÓN DOCUMENTAL / EXPEDIENTE
+                GESTIÃ“N DOCUMENTAL / EXPEDIENTE
               </span>
 
-              <h1>Expediente #{acta.id_acta}</h1>
+
 
               <p>
-                Consulta de información registral y documento original.
+                Consulta de informaciÃ³n registral y documento original.
               </p>
             </div>
 
-            <button
-              className="detalle-back-button"
-              onClick={() => navigate('/actas')}
-            >
-              <ArrowLeft size={17} />
-              Regresar
-            </button>
+            <div className="detalle-admin-actions">
+              {usuario?.rol === 'Administrador' && (
+                <>
+                  <button
+                    type="button"
+                    className="detalle-admin-edit-button"
+                    onClick={() => navigate(`/actas/${id}/editar`)}
+                  >
+                    <Pencil size={16} />
+                    Editar acta
+                  </button>
+                  <button
+                    type="button"
+                    className="detalle-admin-delete-button"
+                    onClick={() => setConfirmarEliminacion(true)}
+                    disabled={eliminando}
+                  >
+                    {eliminando ? <LoaderCircle size={16} className="detalle-admin-spinner" /> : <Trash2 size={16} />}
+                    {eliminando ? 'Eliminando…' : 'Eliminar acta'}
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                className="detalle-back-button"
+                onClick={() => navigate('/actas')}
+              >
+                <ArrowLeft size={17} />
+                Regresar
+              </button>
+            </div>
           </div>
+
+          {errorAccion && (
+            <div className="detalle-admin-error" role="alert">
+              <AlertCircle size={17} />
+              <span>{errorAccion}</span>
+            </div>
+          )}
 
           <div className="detalle-layout">
 
@@ -237,7 +336,7 @@ const DetalleActa = () => {
                   </div>
 
                   <div>
-                    <label>Oficialía</label>
+                    <label>OficialÃ­a</label>
                     <span>{mostrar(acta.oficialia)}</span>
                   </div>
 
@@ -252,7 +351,7 @@ const DetalleActa = () => {
                   </div>
 
                   <div>
-                    <label>Número de acta</label>
+                    <label>NÃºmero de acta</label>
                     <span>{mostrar(acta.numero_acta)}</span>
                   </div>
 
@@ -372,7 +471,7 @@ const DetalleActa = () => {
               <article className="detalle-panel">
                 <div className="detalle-panel-title">
                   <CalendarDays size={19} />
-                  <h2>Información de captura</h2>
+                  <h2>InformaciÃ³n de captura</h2>
                 </div>
 
                 <div className="detalle-fields">
@@ -387,12 +486,12 @@ const DetalleActa = () => {
                   </div>
 
                   <div className="detalle-field-full">
-                    <label>Identificador electrónico</label>
+                    <label>Identificador electrÃ³nico</label>
                     <span>{mostrar(acta.identificador_electronico)}</span>
                   </div>
 
                   <div className="detalle-field-full">
-                    <label>Código de verificación</label>
+                    <label>CÃ³digo de verificaciÃ³n</label>
                     <span>{mostrar(acta.codigo_verificacion)}</span>
                   </div>
                 </div>
@@ -426,6 +525,80 @@ const DetalleActa = () => {
 
         </section>
       </main>
+
+      {confirmarEliminacion && (
+        <div
+          className="acta-confirmacion-fondo"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !eliminando) {
+              setConfirmarEliminacion(false);
+            }
+          }}
+        >
+          <section
+            className="acta-confirmacion-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="acta-confirmacion-titulo"
+          >
+            <div className="acta-confirmacion-icono">
+              <Trash2 size={24} />
+            </div>
+
+            <span className="acta-confirmacion-etiqueta">
+              ACCIÓN PERMANENTE
+            </span>
+            <h2 id="acta-confirmacion-titulo">
+              Eliminar acta #{id}
+            </h2>
+
+            <p>
+              Esta acción eliminará permanentemente el registro del acta y
+              su archivo PDF del almacenamiento. No estarán disponibles para
+              consulta ni podrán recuperarse desde el sistema.
+            </p>
+
+            <div className="acta-confirmacion-nota">
+              <strong>¿Qué se conservará?</strong>
+              <span>
+                Únicamente el evento de auditoría, con una copia histórica de
+                los datos y los metadatos necesarios para dejar constancia de
+                quién realizó la eliminación y cuándo.
+              </span>
+            </div>
+
+            <div className="acta-confirmacion-acciones">
+              <button
+                type="button"
+                className="acta-confirmacion-cancelar"
+                onClick={() => setConfirmarEliminacion(false)}
+                disabled={eliminando}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="acta-confirmacion-eliminar"
+                onClick={eliminarActa}
+                disabled={eliminando}
+              >
+                {eliminando ? (
+                  <>
+                    <LoaderCircle size={17} className="detalle-admin-spinner" />
+                    Eliminando…
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={17} />
+                    Eliminar permanentemente
+                  </>
+                )}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 };

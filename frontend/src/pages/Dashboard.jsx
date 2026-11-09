@@ -111,16 +111,22 @@ const Dashboard = () => {
         <header className="topbar">
           <span>Sistema de Gestión Documental</span>
 
-          <div className="user-info">
-            <div className="user-avatar">
-              {usuario?.nombre_completo?.charAt(0) || 'U'}
-            </div>
+          <button
+  type="button"
+  className="user-info mi-cuenta-trigger"
+  onClick={() => navigate('/mi-cuenta')}
+  title="Abrir mi cuenta"
+  aria-label="Abrir mi cuenta y cambiar contraseña"
+>
+  <div className="user-avatar">
+    {usuario?.nombre_completo?.charAt(0) || 'U'}
+  </div>
 
-            <div>
-              <strong>{usuario?.nombre_completo}</strong>
-              <small>{usuario?.rol}</small>
-            </div>
-          </div>
+  <div>
+    <strong>{usuario?.nombre_completo}</strong>
+    <small>{usuario?.rol}</small>
+  </div>
+</button>
         </header>
 
         <section className="dashboard-content">

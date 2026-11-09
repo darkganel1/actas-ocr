@@ -1,4 +1,3 @@
-
 import axios from 'axios';
 
 const api = axios.create({
@@ -9,32 +8,27 @@ const api = axios.create({
   }
 });
 
-// Agregar token automáticamente a las peticiones.
+// Agrega automáticamente el token a las peticiones protegidas.
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
-
   if (token) {
+    config.headers = config.headers || {};
     config.headers.Authorization = `Bearer ${token}`;
   }
-
   return config;
 });
 
-// Manejo centralizado de sesiones inválidas.
+// Centraliza la expiración, inactividad y revocación de sesiones.
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    const esLogin = error.config?.url?.includes('/auth/login');
+    const url = error.config?.url || '';
+    const esLogin = url.includes('/auth/login');
+    const esLogout = url.includes('/auth/logout');
 
-    if (error.response?.status === 401 && !esLogin) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('usuario');
-
-      window.dispatchEvent(
-        new Event('sesion-expirada')
-      );
+    if (error.response?.status === 401 && !esLogin && !esLogout) {
+      window.dispatchEvent(new Event('sesion-expirada'));
     }
-
     return Promise.reject(error);
   }
 );

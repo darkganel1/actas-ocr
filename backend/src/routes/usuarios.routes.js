@@ -8,6 +8,8 @@ const {
   listarUsuarios,
   obtenerUsuario,
   crearUsuario,
+  actualizarUsuario,
+  restablecerPasswordUsuario,
   cambiarEstadoUsuario
 } = require('../controllers/usuarios.controller');
 
@@ -17,6 +19,8 @@ router.use(requiereAdministrador);
 router.get('/', listarUsuarios);
 router.get('/:id', obtenerUsuario);
 router.post('/', crearUsuario);
+router.patch('/:id', actualizarUsuario);
 router.patch('/:id/estado', cambiarEstadoUsuario);
+router.patch('/:id/password', restablecerPasswordUsuario);
 
 module.exports = router;
