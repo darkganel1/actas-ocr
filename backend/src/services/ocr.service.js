@@ -8,52 +8,72 @@ const crypto = require('crypto');
 
 const ejecutar = promisify(execFile);
 
+// Raíz del proyecto: C:\actas-ocr
+const raizProyecto = path.resolve(__dirname, '../../..');
+
 const procesarPDF = async (archivo) => {
   const directorioTemporal = await fs.mkdtemp(
     path.join(os.tmpdir(), 'registro-actas-')
   );
 
   try {
-    // Nombre controlado para evitar problemas con caracteres especiales.
+    // PDF temporal con nombre controlado.
     const rutaPDF = path.join(directorioTemporal, 'documento.pdf');
 
     await fs.writeFile(rutaPDF, archivo.buffer);
 
-    // Huella digital para detectar archivos idénticos posteriormente.
+    // Huella digital SHA-256.
     const sha256 = crypto
       .createHash('sha256')
       .update(archivo.buffer)
       .digest('hex');
 
-    const rutaScript = path.resolve(
-      process.cwd(),
-      process.env.OCR_SCRIPT || '../ocr/lector_inteligente_v19.py'
+    // Resolver rutas desde la raíz del proyecto.
+    const configuracionScript =
+      process.env.OCR_SCRIPT || 'ocr/lector_paddleocr_v4_1.py';
+
+    const rutaScript = path.isAbsolute(configuracionScript)
+      ? configuracionScript
+      : path.resolve(raizProyecto, configuracionScript);
+
+    const configuracionPython =
+      process.env.OCR_PYTHON ||
+      '.venv-paddle/Scripts/python.exe';
+
+    const python = path.isAbsolute(configuracionPython)
+      ? configuracionPython
+      : path.resolve(raizProyecto, configuracionPython);
+
+    // Carpeta única para evitar sobrescribir documentos.
+    const identificador = crypto.randomUUID();
+
+    const directorioSalida = path.join(
+      raizProyecto,
+      'storage',
+      'paddleocr',
+      `proceso_${identificador}`
     );
 
-    const python = process.env.OCR_PYTHON || 'python';
-    const poppler = process.env.OCR_POPPLER_PATH;
+    // Argumentos para PaddleOCR V4.1.
+    const argumentos = [
+      rutaScript,
+      rutaPDF,
+      '--salida',
+      directorioSalida
+    ];
 
-    const argumentos = [rutaScript, rutaPDF];
-
-    if (poppler && poppler.trim() !== '') {
-      argumentos.push('--poppler', poppler);
-    }
-
-    // Ejecutar OCR dentro del directorio temporal aislado.
+    // Ejecutar OCR.
     await ejecutar(python, argumentos, {
-      cwd: directorioTemporal,
+      cwd: raizProyecto,
       windowsHide: true,
-      timeout: 600000, // 10 minutos
-maxBuffer: 30 * 1024 * 1024
+      timeout: 600000,
+      maxBuffer: 30 * 1024 * 1024
     });
 
-    // V19 genera el JSON dentro de storage/procesados/<nombre>/.
+    // Leer el JSON generado por V4.1.
     const rutaResultado = path.join(
-      directorioTemporal,
-      'storage',
-      'procesados',
-      'documento',
-      'resultado_ocr_v19.json'
+      directorioSalida,
+      'resultado_paddleocr_v4_1.json'
     );
 
     const contenido = await fs.readFile(rutaResultado, 'utf8');
@@ -64,35 +84,36 @@ maxBuffer: 30 * 1024 * 1024
       resultado
     };
 
-  }  catch (error) {
-  console.error('Error en servicio OCR:', error.message);
+  } catch (error) {
+    console.error('Error en servicio OCR:', error.message);
 
-  if (error.stdout) {
-    console.error('OCR STDOUT:', error.stdout);
-  }
+    if (error.stdout) {
+      console.error('OCR STDOUT:', error.stdout);
+    }
 
-  if (error.stderr) {
-    console.error('OCR STDERR:', error.stderr);
-  }
+    if (error.stderr) {
+      console.error('OCR STDERR:', error.stderr);
+    }
 
-  if (error.killed) {
+    if (error.killed) {
+      throw new Error(
+        'El procesamiento OCR superó el límite de 10 minutos.'
+      );
+    }
+
+    if (error.code === 'ENOENT') {
+      throw new Error(
+        'No se encontró Python, el script OCR o el archivo de resultado.'
+      );
+    }
+
     throw new Error(
-      'El procesamiento OCR superó el límite de 10 minutos.'
+      error.message || 'No fue posible procesar el documento.'
     );
-  }
 
-  if (error.code === 'ENOENT') {
-    throw new Error(
-      'No se encontró Python, el script OCR o el archivo de resultado.'
-    );
-  }
-
-  throw new Error(
-    error.message || 'No fue posible procesar el documento.'
-  );
-
-} finally {
-    // Elimina PDF temporal, JSON, CSV e imágenes de evidencia.
+  } finally {
+    // Eliminar únicamente los archivos temporales.
+    // Los resultados PaddleOCR permanecen en storage/paddleocr.
     await fs.rm(directorioTemporal, {
       recursive: true,
       force: true

@@ -33,10 +33,14 @@ const crearActa = async (req, res) => {
       });
     }
 
+    const confirmarDuplicado =
+      req.body.confirmarDuplicado === 'true';
+
     const resultado = await guardarActa({
       archivo: req.file,
       datos,
-      idUsuario: req.usuario.id_usuario
+      idUsuario: req.usuario.id_usuario,
+      confirmarDuplicado
     });
 
     return res.status(201).json({
@@ -52,7 +56,8 @@ const crearActa = async (req, res) => {
 
     return res.status(error.statusCode || 400).json({
       success: false,
-      mensaje: error.message || 'No fue posible guardar el acta.'
+      mensaje: error.message || 'No fue posible guardar el acta.',
+      requiereConfirmacion: error.requiereConfirmacion === true
     });
   }
 };

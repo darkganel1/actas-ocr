@@ -122,7 +122,79 @@ function obtenerConfianza(campos, nombre) {
   }
 
   const numero = Number(confianza);
-  return Number.isFinite(numero) ? numero : null;
+
+  if (!Number.isFinite(numero)) return null;
+
+  // PaddleOCR V4.1 entrega confianza como fracción (0 a 1).
+  // La interfaz trabaja con porcentajes (0 a 100).
+  // Si el backend ya entrega un porcentaje, se conserva.
+  const porcentaje = numero >= 0 && numero <= 1
+    ? numero * 100
+    : numero;
+
+  return Math.max(0, Math.min(100, porcentaje));
+}
+
+// Recupera Entidad y Municipio desde las líneas OCR generales.
+// PaddleOCR detecta ambos rótulos y sus valores, aunque V4.1 todavía
+// no los publica dentro de resultado.campos.
+function extraerCampoPorEtiquetaGeometrica(resultado, etiquetaBuscada) {
+  const lineas = (resultado?.paginas || []).flatMap(
+    (pagina) => pagina?.ocr_lineas || []
+  );
+
+  const normalizar = (texto) =>
+    String(texto || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\\s+/g, ' ')
+      .trim()
+      .toLocaleLowerCase('es');
+
+  const etiqueta = lineas.find(
+    (linea) => normalizar(linea.texto) === normalizar(etiquetaBuscada)
+  );
+
+  if (!etiqueta || !Array.isArray(etiqueta.coordenadas_xyxy)) {
+    return { valor: '', confianza: null };
+  }
+
+  const [x1, y1, x2, y2] = etiqueta.coordenadas_xyxy;
+
+  const candidatos = lineas
+    .filter((linea) => {
+      if (!Array.isArray(linea.coordenadas_xyxy)) return false;
+
+      const [lx1, ly1, lx2] = linea.coordenadas_xyxy;
+      const texto = normalizar(linea.texto);
+
+      if (!texto || texto === normalizar(etiquetaBuscada)) return false;
+
+      // El valor debe estar debajo del rótulo y compartir su zona horizontal.
+      const solapamiento = Math.max(0, Math.min(x2, lx2) - Math.max(x1, lx1));
+      const anchoMinimo = Math.min(x2 - x1, lx2 - lx1);
+      const solapamientoRelativo = anchoMinimo > 0
+        ? solapamiento / anchoMinimo
+        : 0;
+
+      return ly1 >= y2 && ly1 - y2 <= 100 && solapamientoRelativo >= 0.35;
+    })
+    .sort((a, b) => {
+      const gapA = a.coordenadas_xyxy[1] - y2;
+      const gapB = b.coordenadas_xyxy[1] - y2;
+      return gapA - gapB;
+    });
+
+  const mejor = candidatos[0];
+
+  return mejor
+    ? {
+        valor: String(mejor.texto || '').trim(),
+        confianza: Number.isFinite(Number(mejor.confianza))
+          ? Number(mejor.confianza)
+          : null
+      }
+    : { valor: '', confianza: null };
 }
 
 function estadoConfianza(confianza) {
@@ -298,6 +370,7 @@ export default function NuevaActa() {
       );
 
       const resultado = respuesta.data.resultado;
+
       const camposOCR = resultado?.campos || {};
 
       const nuevosDatos = { ...CAMPOS_INICIALES };
@@ -310,6 +383,63 @@ export default function NuevaActa() {
           campoOCR
         );
       });
+
+      // Entidad y Municipio no vienen aún en resultado.campos de V4.1.
+      // Se recuperan de las líneas OCR usando etiqueta + posición geométrica.
+      const entidadOCR = extraerCampoPorEtiquetaGeometrica(
+        resultado,
+        'Entidad de Registro'
+      );
+      const municipioOCR = extraerCampoPorEtiquetaGeometrica(
+        resultado,
+        'Municipio de Registro'
+      );
+
+      nuevosDatos.entidad = entidadOCR.valor;
+      nuevosDatos.municipio = municipioOCR.valor;
+      nuevasConfianzas.entidad = entidadOCR.confianza;
+      nuevasConfianzas.municipio = municipioOCR.confianza;
+
+      // La sección de filiación conserva el orden de lectura del acta:
+      // primer registro -> padre; segundo registro -> madre.
+      // Los campos quedan editables para que el usuario corrija cualquier error.
+      const registrosFiliacion = resultado?.secciones?.filiacion?.registros;
+
+      if (Array.isArray(registrosFiliacion)) {
+        const extraerFiliacion = (registro) => {
+          const campos = registro?.campos || {};
+          return {
+            nombre: valorOCR(campos, 'nombre'),
+            primer_apellido: valorOCR(campos, 'primer_apellido'),
+            segundo_apellido: valorOCR(campos, 'segundo_apellido'),
+            nacionalidad: valorOCR(campos, 'nacionalidad'),
+            curp: valorOCR(campos, 'curp')
+          };
+        };
+
+        const padre = registrosFiliacion[0]
+          ? extraerFiliacion(registrosFiliacion[0])
+          : null;
+        const madre = registrosFiliacion[1]
+          ? extraerFiliacion(registrosFiliacion[1])
+          : null;
+
+        if (padre) {
+          nuevosDatos.nombre_padre = padre.nombre;
+          nuevosDatos.primer_apellido_padre = padre.primer_apellido;
+          nuevosDatos.segundo_apellido_padre = padre.segundo_apellido;
+          nuevosDatos.curp_padre = padre.curp;
+          nuevosDatos.nacionalidad_padre = padre.nacionalidad;
+        }
+
+        if (madre) {
+          nuevosDatos.nombre_madre = madre.nombre;
+          nuevosDatos.primer_apellido_madre = madre.primer_apellido;
+          nuevosDatos.segundo_apellido_madre = madre.segundo_apellido;
+          nuevosDatos.curp_madre = madre.curp;
+          nuevosDatos.nacionalidad_madre = madre.nacionalidad;
+        }
+      }
 
       setDatos(nuevosDatos);
       setConfianzas(nuevasConfianzas);
