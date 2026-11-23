@@ -31,3 +31,5 @@ node_modules/
 dist/
 build/
 *.log
+# Entorno independiente PaddleOCR
+.venv-paddle/
